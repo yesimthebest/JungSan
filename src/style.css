@@ -552,7 +552,7 @@ main {
 .transfer-bottom {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: 1fr 1.2fr 38px;
+  grid-template-columns: 1fr 38px;
   align-items: end;
   gap: 10px;
 }
@@ -1569,7 +1569,7 @@ main {
   }
 
   .transfer-bottom {
-    grid-template-columns: 0.9fr 1.2fr 34px;
+    grid-template-columns: 1fr 34px;
     gap: 6px;
   }
 

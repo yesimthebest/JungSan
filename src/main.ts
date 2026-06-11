@@ -323,10 +323,6 @@ function renderTransfer(transfer: Transfer) {
       </div>
       <div class="transfer-bottom">
         <label class="field">
-          <span>날짜</span>
-          <input class="transfer-date" type="date" value="${transfer.date}" />
-        </label>
-        <label class="field">
           <span>송금액</span>
           <span class="money-input">
             <input class="transfer-amount" type="text" inputmode="numeric" value="${transfer.amount ? transfer.amount.toLocaleString("ko-KR") : ""}" placeholder="0" />
@@ -743,7 +739,7 @@ function bindEvents() {
     updateAndRender(() => {
       state.transfers.push({
         id: uid("t"),
-        date: new Date().toISOString().slice(0, 10),
+        date: "",
         senderId: "",
         receiverId: "",
         amount: 0,
@@ -802,11 +798,6 @@ function bindEvents() {
     card.querySelector<HTMLSelectElement>(".transfer-receiver")?.addEventListener("change", (event) => {
       updateAndRender(() => {
         transfer.receiverId = (event.target as HTMLSelectElement).value;
-      });
-    });
-    card.querySelector<HTMLInputElement>(".transfer-date")?.addEventListener("change", (event) => {
-      updateAndRender(() => {
-        transfer.date = (event.target as HTMLInputElement).value;
       });
     });
     card.querySelector<HTMLInputElement>(".transfer-amount")?.addEventListener("change", (event) => {
