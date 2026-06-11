@@ -9,6 +9,10 @@ npm install
 npm run dev
 ```
 
+## Live Demo
+
+https://jungsan-ebon.vercel.app
+
 ## 기능
 
 - 첫 화면에서 새 정산 시작 또는 참여 키 입력
