@@ -1,5 +1,24 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
 .DS_Store
-supabase/
+*.log
+.vite/
+.vercel/
+.direnv/
+.envrc
+
+# Local Supabase state. Schema and migrations should stay versioned.
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# Private keys and local credentials.
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
