@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.1",
     "lucide": "^0.468.0"
   },
   "devDependencies": {
