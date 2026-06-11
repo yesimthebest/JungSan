@@ -76,17 +76,14 @@ const icons = {
 
 const initialState: AppState = {
   title: "새 정산",
-  participants: [
-    { id: "p1", name: "참여자 1" },
-    { id: "p2", name: "참여자 2" },
-  ],
+  participants: [],
   expenses: [
     {
       id: "e1",
       title: "비용 1",
       payerId: "",
       amount: 0,
-      participantIds: ["p1", "p2"],
+      participantIds: [],
     },
   ],
   transfers: [],
@@ -156,6 +153,24 @@ function escapeHtml(value: string) {
 
 function participantName(id: string) {
   return state.participants.find((person) => person.id === id)?.name || "선택 안 함";
+}
+
+function removeUntouchedStarterParticipants(data: AppState) {
+  const hasStarterPeople =
+    data.participants.length === 2 &&
+    data.participants[0]?.name === "참여자 1" &&
+    data.participants[1]?.name === "참여자 2";
+  const isUntouched =
+    data.expenses.length === 1 &&
+    data.expenses[0]?.title === "비용 1" &&
+    data.expenses[0]?.amount === 0 &&
+    data.transfers.length === 0;
+
+  if (!hasStarterPeople || !isUntouched) return false;
+  data.participants = [];
+  data.expenses[0].participantIds = [];
+  data.expenses[0].payerId = "";
+  return true;
 }
 
 function getSummary(): PersonSummary[] {
@@ -266,16 +281,20 @@ function renderExpense(expense: Expense, index: number) {
           <span>${expense.participantIds.length}명 · 1인 ${formatWon(share)}</span>
         </div>
         <div class="participant-chips">
-          ${state.participants
-            .map(
-              (person) => `
+          ${
+            state.participants.length
+              ? state.participants
+                  .map(
+                    (person) => `
                 <button class="participant-chip ${expense.participantIds.includes(person.id) ? "active" : ""}" data-person-id="${person.id}">
                   <span class="check-circle"><i data-lucide="check"></i></span>
                   ${escapeHtml(person.name)}
                 </button>
               `,
-            )
-            .join("")}
+                  )
+                  .join("")
+              : `<span class="no-participants">설정에서 참여자를 직접 추가해 주세요.</span>`
+          }
         </div>
       </div>
     </article>
@@ -349,7 +368,7 @@ function renderSettings() {
               <div class="person-edit" data-id="${person.id}">
                 <span class="avatar">${index + 1}</span>
                 <input class="person-name" type="text" value="${escapeHtml(person.name)}" aria-label="참여자 이름" />
-                <button class="icon-button subtle delete-person" aria-label="참여자 삭제" ${state.participants.length <= 2 ? "disabled" : ""}>
+                <button class="icon-button subtle delete-person" aria-label="참여자 삭제">
                   <i data-lucide="trash-2"></i>
                 </button>
               </div>
@@ -836,10 +855,11 @@ function bindEvents() {
   });
 
   document.querySelector("#add-person")?.addEventListener("click", () => {
+    const name = window.prompt("추가할 참여자 이름을 입력해 주세요.");
+    if (!name?.trim()) return;
     updateAndRender(() => {
-      const person = { id: uid("p"), name: `참여자 ${state.participants.length + 1}` };
+      const person = { id: uid("p"), name: name.trim() };
       state.participants.push(person);
-      state.expenses.forEach((expense) => expense.participantIds.push(person.id));
       settingsOpen = true;
     });
   });
@@ -900,6 +920,10 @@ async function openRecord(id: string) {
     if (!record) throw new Error("정산을 찾을 수 없거나 접근 권한이 없습니다.");
     currentRecord = record;
     state = structuredClone(record.data);
+    if (removeUntouchedStarterParticipants(state)) {
+      currentRecord.data = structuredClone(state);
+      await updateSettlement(currentRecord, state);
+    }
     settingsOpen = false;
     saveStatus = "saved";
     const url = new URL(window.location.href);
