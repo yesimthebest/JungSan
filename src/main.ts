@@ -8,12 +8,11 @@ import {
   Download,
   FolderOpen,
   Home,
-  LogOut,
+  KeyRound,
   Plus,
   ReceiptText,
   RotateCcw,
   Settings2,
-  Share2,
   Trash2,
   Upload,
   WalletCards,
@@ -24,14 +23,11 @@ import "./style.css";
 import {
   createSettlement,
   deleteSettlement,
-  getSession,
   getSettlement,
+  formatShareKey,
   isCloudEnabled,
   joinSettlement,
   listSettlements,
-  onAuthChange,
-  sendMagicLink,
-  signOut,
   subscribeToSettlements,
   updateSettlement,
   type Expense,
@@ -40,7 +36,6 @@ import {
   type SettlementRecord,
   type Transfer,
 } from "./database";
-import type { Session } from "@supabase/supabase-js";
 
 type AppState = SettlementData;
 
@@ -68,12 +63,11 @@ const icons = {
   Download,
   FolderOpen,
   Home,
-  LogOut,
+  KeyRound,
   Plus,
   ReceiptText,
   RotateCcw,
   Settings2,
-  Share2,
   Trash2,
   Upload,
   WalletCards,
@@ -104,7 +98,6 @@ let state = cloneInitialState();
 let settingsOpen = false;
 let currentRecord: SettlementRecord | null = null;
 let records: SettlementRecord[] = [];
-let session: Session | null = null;
 let saveTimer = 0;
 let saveStatus: "saved" | "saving" | "error" = "saved";
 let unsubscribeRealtime: () => void = () => undefined;
@@ -120,7 +113,9 @@ function saveState() {
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(async () => {
     try {
-      await updateSettlement(recordId, snapshot);
+      const record = currentRecord?.id === recordId ? currentRecord : records.find((item) => item.id === recordId);
+      if (!record) throw new Error("정산 접근 키를 찾을 수 없습니다.");
+      await updateSettlement(record, snapshot);
       saveStatus = "saved";
     } catch (error) {
       console.error(error);
@@ -363,7 +358,11 @@ function renderSettings() {
           .join("")}
       </div>
       <button class="outline-button full-width" id="add-person"><i data-lucide="plus"></i> 참여자 추가</button>
-      <button class="primary-button full-width" id="share-settlement"><i data-lucide="share-2"></i> 초대 링크 복사</button>
+      <div class="share-key-box">
+        <span>정산 참여 키</span>
+        <strong>${currentRecord ? formatShareKey(currentRecord.shareKey) : ""}</strong>
+        <button class="primary-button full-width" id="share-settlement"><i data-lucide="key-round"></i> 참여 키 복사</button>
+      </div>
       <div class="data-actions">
         <button class="text-action" id="export-data"><i data-lucide="download"></i> 백업</button>
         <label class="text-action file-action"><i data-lucide="upload"></i> 불러오기<input id="import-data" type="file" accept="application/json" /></label>
@@ -402,45 +401,6 @@ function renderLoading(message = "정산을 불러오는 중이에요") {
   createIcons({ icons });
 }
 
-function renderLogin(sent = false, errorMessage = "") {
-  document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
-    ${renderAppHeader()}
-    <main class="center-page">
-      <section class="login-card">
-        <p class="eyebrow">SHARED SETTLEMENT</p>
-        <h2>함께 쓰는 정산에 로그인</h2>
-        <p>이메일로 받은 로그인 링크를 열면 공동 정산 목록을 안전하게 사용할 수 있어요.</p>
-        ${
-          sent
-            ? `<div class="login-success"><i data-lucide="check"></i><b>이메일을 확인해 주세요</b><span>로그인 링크를 보냈습니다.</span></div>`
-            : `<form id="login-form">
-                <label class="field">
-                  <span>이메일</span>
-                  <input id="login-email" type="email" autocomplete="email" placeholder="name@example.com" required />
-                </label>
-                <button class="primary-button" type="submit">로그인 링크 받기</button>
-              </form>`
-        }
-        ${errorMessage ? `<p class="form-error">${escapeHtml(errorMessage)}</p>` : ""}
-      </section>
-    </main>
-  `;
-  createIcons({ icons });
-  document.querySelector<HTMLFormElement>("#login-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const email = document.querySelector<HTMLInputElement>("#login-email")!.value.trim();
-    const button = document.querySelector<HTMLButtonElement>("#login-form button")!;
-    button.disabled = true;
-    button.textContent = "전송 중...";
-    try {
-      await sendMagicLink(email);
-      renderLogin(true);
-    } catch (error) {
-      renderLogin(false, error instanceof Error ? error.message : "로그인 링크를 보내지 못했습니다.");
-    }
-  });
-}
-
 function recordTotal(record: SettlementRecord) {
   return record.data.expenses.reduce((sum, expense) => sum + expense.amount, 0);
 }
@@ -454,61 +414,141 @@ function formatUpdatedAt(value: string) {
   }).format(new Date(value));
 }
 
-function renderList() {
-  const userId = session?.user.id || "local-user";
-  document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
-    ${renderAppHeader(`
-      ${isCloudEnabled ? `<button class="settings-button" id="logout"><i data-lucide="log-out"></i><span>로그아웃</span></button>` : ""}
-    `)}
-    <main class="list-page">
-      <section class="list-hero">
-        <div>
-          <p class="eyebrow">MY SETTLEMENTS</p>
-          <h2>정산 목록</h2>
-          <p>여러 모임의 비용을 한곳에서 관리하세요.</p>
+function renderRecordCard(record: SettlementRecord) {
+  return `
+    <article class="settlement-list-card" data-id="${record.id}">
+      <button class="settlement-open" aria-label="${escapeHtml(record.title)} 열기">
+        <span class="folder-icon"><i data-lucide="folder-open"></i></span>
+        <div class="record-main">
+          <h3>${escapeHtml(record.title)}</h3>
+          <p>${record.data.participants.length}명 · ${record.data.expenses.filter((item) => item.amount > 0).length}개 지출</p>
         </div>
-        <button class="new-settlement-button" id="new-settlement"><i data-lucide="plus"></i> 새 정산</button>
+        <strong>${formatWon(recordTotal(record))}</strong>
+        <small>${formatUpdatedAt(record.updated_at)} 수정</small>
+      </button>
+      ${
+        record.ownerKey
+          ? `<button class="delete-record icon-button" aria-label="${escapeHtml(record.title)} 삭제"><i data-lucide="trash-2"></i></button>`
+          : `<span class="shared-badge">참여 중</span>`
+      }
+    </article>
+  `;
+}
+
+function renderLanding(mode: "home" | "create" | "join" = "home", errorMessage = "") {
+  document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
+    ${renderAppHeader()}
+    <main class="landing-page">
+      <section class="landing-intro">
+        <p class="eyebrow">SHARED SETTLEMENT</p>
+        <h2>누구나 간편하게<br />함께 정산해요</h2>
+        <p>로그인 없이 참여 키 하나로 같은 정산을 공유할 수 있어요.</p>
+      </section>
+      <section class="start-options">
+        <button class="start-option primary-option" id="start-settlement">
+          <span class="start-icon"><i data-lucide="plus"></i></span>
+          <span><b>정산 시작하기</b><small>새 정산을 만들고 참여 키를 공유해요</small></span>
+          <i data-lucide="arrow-right"></i>
+        </button>
+        <button class="start-option" id="join-settlement">
+          <span class="start-icon"><i data-lucide="key-round"></i></span>
+          <span><b>정산 참여하기</b><small>공유받은 참여 키로 바로 들어가요</small></span>
+          <i data-lucide="arrow-right"></i>
+        </button>
       </section>
       ${
+        mode === "create"
+          ? `<section class="action-panel">
+              <div class="action-panel-head">
+                <div><p class="eyebrow">NEW SETTLEMENT</p><h3>새 정산 만들기</h3></div>
+                <button class="icon-button close-action" aria-label="닫기"><i data-lucide="x"></i></button>
+              </div>
+              <form id="create-form">
+                <label class="field">
+                  <span>정산 이름</span>
+                  <input id="new-title" type="text" maxlength="40" placeholder="예: 제주 여행 정산" required autofocus />
+                </label>
+                <button class="primary-button" type="submit">정산 만들기</button>
+              </form>
+            </section>`
+          : ""
+      }
+      ${
+        mode === "join"
+          ? `<section class="action-panel">
+              <div class="action-panel-head">
+                <div><p class="eyebrow">JOIN SETTLEMENT</p><h3>참여 키 입력</h3></div>
+                <button class="icon-button close-action" aria-label="닫기"><i data-lucide="x"></i></button>
+              </div>
+              <form id="join-form">
+                <label class="field">
+                  <span>참여 키</span>
+                  <input id="participation-key" class="key-input" type="text" maxlength="14" autocomplete="off" placeholder="AB12-CD34-EF56" required autofocus />
+                </label>
+                <button class="primary-button" type="submit">정산 참여하기</button>
+              </form>
+            </section>`
+          : ""
+      }
+      ${errorMessage ? `<p class="form-error landing-error">${escapeHtml(errorMessage)}</p>` : ""}
+      ${
         records.length
-          ? `<div class="settlement-grid">
-              ${records
-                .map(
-                  (record) => `
-                    <article class="settlement-list-card" data-id="${record.id}">
-                      <button class="settlement-open" aria-label="${escapeHtml(record.title)} 열기">
-                        <span class="folder-icon"><i data-lucide="folder-open"></i></span>
-                        <div class="record-main">
-                          <h3>${escapeHtml(record.title)}</h3>
-                          <p>${record.data.participants.length}명 · ${record.data.expenses.filter((item) => item.amount > 0).length}개 지출</p>
-                        </div>
-                        <strong>${formatWon(recordTotal(record))}</strong>
-                        <small>${formatUpdatedAt(record.updated_at)} 수정</small>
-                      </button>
-                      ${
-                        record.owner_id === userId
-                          ? `<button class="delete-record icon-button" aria-label="${escapeHtml(record.title)} 삭제"><i data-lucide="trash-2"></i></button>`
-                          : `<span class="shared-badge">공유됨</span>`
-                      }
-                    </article>
-                  `,
-                )
-                .join("")}
-            </div>`
-          : `<div class="empty-list">
-              <span><i data-lucide="folder-open"></i></span>
-              <h3>아직 정산이 없어요</h3>
-              <p>새 정산을 만들어 비용 기록을 시작해 보세요.</p>
-            </div>`
+          ? `<section class="recent-section">
+              <div class="recent-heading"><h3>최근 정산</h3><span>${records.length}개</span></div>
+              <div class="settlement-grid">${records.map(renderRecordCard).join("")}</div>
+            </section>`
+          : ""
       }
       <p class="cloud-note"><i data-lucide="${isCloudEnabled ? "cloud" : "home"}"></i> ${
-        isCloudEnabled ? "초대된 사용자와 실시간으로 공유됩니다." : "Supabase 연결 전이라 이 기기에만 저장됩니다."
+        isCloudEnabled ? "참여 키로 여러 기기에서 함께 저장됩니다." : "Supabase 연결 전이라 이 기기에만 저장됩니다."
       }</p>
     </main>
   `;
   createIcons({ icons });
-  bindListEvents();
+  bindLandingEvents();
+  bindRecordEvents();
   bindHeaderEvents();
+}
+
+function bindLandingEvents() {
+  document.querySelector("#start-settlement")?.addEventListener("click", () => renderLanding("create"));
+  document.querySelector("#join-settlement")?.addEventListener("click", () => renderLanding("join"));
+  document.querySelector(".close-action")?.addEventListener("click", () => renderLanding());
+
+  document.querySelector<HTMLFormElement>("#create-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const title = document.querySelector<HTMLInputElement>("#new-title")!.value.trim();
+    const button = document.querySelector<HTMLButtonElement>("#create-form button")!;
+    button.disabled = true;
+    button.textContent = "만드는 중...";
+    try {
+      const newState = cloneInitialState();
+      newState.title = title || "새 정산";
+      const record = await createSettlement(newState);
+      await openRecord(record.id);
+    } catch (error) {
+      renderLanding("create", error instanceof Error ? error.message : "정산을 만들지 못했습니다.");
+    }
+  });
+
+  document.querySelector<HTMLFormElement>("#join-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const key = document.querySelector<HTMLInputElement>("#participation-key")!.value;
+    const button = document.querySelector<HTMLButtonElement>("#join-form button")!;
+    button.disabled = true;
+    button.textContent = "확인 중...";
+    try {
+      const record = await joinSettlement(key);
+      await openRecord(record.id);
+    } catch (error) {
+      renderLanding("join", error instanceof Error ? error.message : "참여 키를 확인해 주세요.");
+    }
+  });
+
+  document.querySelector<HTMLInputElement>("#participation-key")?.addEventListener("input", (event) => {
+    const input = event.target as HTMLInputElement;
+    input.value = formatShareKey(input.value);
+  });
 }
 
 function render() {
@@ -806,13 +846,12 @@ function bindEvents() {
 
   document.querySelector("#share-settlement")?.addEventListener("click", async () => {
     if (!currentRecord) return;
-    const inviteUrl = new URL(window.location.origin);
-    inviteUrl.searchParams.set("invite", currentRecord.share_token);
+    const key = formatShareKey(currentRecord.shareKey);
     try {
-      await navigator.clipboard.writeText(inviteUrl.toString());
-      window.alert("초대 링크를 복사했습니다. 함께 정산할 사람에게 보내주세요.");
+      await navigator.clipboard.writeText(key);
+      window.alert(`참여 키 ${key}를 복사했습니다.`);
     } catch {
-      window.prompt("아래 초대 링크를 복사해 주세요.", inviteUrl.toString());
+      window.prompt("아래 참여 키를 복사해 주세요.", key);
     }
   });
 
@@ -833,19 +872,7 @@ function bindHeaderEvents() {
   document.querySelector("#go-home")?.addEventListener("click", () => void showList());
 }
 
-function bindListEvents() {
-  document.querySelector("#new-settlement")?.addEventListener("click", async () => {
-    const button = document.querySelector<HTMLButtonElement>("#new-settlement")!;
-    button.disabled = true;
-    try {
-      const record = await createSettlement(cloneInitialState());
-      await openRecord(record.id);
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : "새 정산을 만들지 못했습니다.");
-      button.disabled = false;
-    }
-  });
-
+function bindRecordEvents() {
   document.querySelectorAll<HTMLElement>(".settlement-list-card").forEach((card) => {
     const record = records.find((item) => item.id === card.dataset.id);
     if (!record) return;
@@ -856,19 +883,13 @@ function bindListEvents() {
       );
       if (!confirmed) return;
       try {
-        await deleteSettlement(record.id);
+        await deleteSettlement(record);
         records = records.filter((item) => item.id !== record.id);
-        renderList();
+        renderLanding();
       } catch (error) {
         window.alert(error instanceof Error ? error.message : "정산을 삭제하지 못했습니다.");
       }
     });
-  });
-
-  document.querySelector("#logout")?.addEventListener("click", async () => {
-    await signOut();
-    session = null;
-    renderLogin();
   });
 }
 
@@ -882,7 +903,7 @@ async function openRecord(id: string) {
     settingsOpen = false;
     saveStatus = "saved";
     const url = new URL(window.location.href);
-    if (url.searchParams.get("settlement") !== id || url.searchParams.has("invite")) {
+    if (url.searchParams.get("settlement") !== id) {
       url.search = "";
       url.searchParams.set("settlement", id);
       history.pushState({}, "", url);
@@ -898,7 +919,7 @@ async function showList() {
   window.clearTimeout(saveTimer);
   if (currentRecord && saveStatus === "saving") {
     try {
-      await updateSettlement(currentRecord.id, structuredClone(state));
+      await updateSettlement(currentRecord, structuredClone(state));
     } catch {
       // The list can still open; the save indicator has already shown the failure.
     }
@@ -913,7 +934,7 @@ async function showList() {
   renderLoading("정산 목록을 불러오는 중이에요");
   try {
     records = await listSettlements();
-    renderList();
+    renderLanding();
   } catch (error) {
     renderError(error instanceof Error ? error.message : "정산 목록을 불러오지 못했습니다.");
   }
@@ -938,22 +959,6 @@ function renderError(message: string) {
 
 async function route() {
   const url = new URL(window.location.href);
-  const inviteToken = url.searchParams.get("invite");
-  if (inviteToken && isCloudEnabled) {
-    renderLoading("초대받은 정산에 참여하는 중이에요");
-    try {
-      const joinedId = await joinSettlement(inviteToken);
-      url.search = "";
-      url.searchParams.set("settlement", joinedId);
-      history.replaceState({}, "", url);
-      await openRecord(joinedId);
-      return;
-    } catch (error) {
-      renderError(error instanceof Error ? error.message : "초대 링크를 사용할 수 없습니다.");
-      return;
-    }
-  }
-
   const settlementId = url.searchParams.get("settlement");
   if (settlementId) {
     await openRecord(settlementId);
@@ -990,27 +995,14 @@ async function migrateLegacySettlement() {
 
 async function bootstrap() {
   renderLoading();
-  if (isCloudEnabled) {
-    session = await getSession();
-    if (!session) {
-      renderLogin();
-      onAuthChange((nextSession) => {
-        if (nextSession) {
-          session = nextSession;
-          void route();
-        }
-      });
-      return;
-    }
-  }
-
   await migrateLegacySettlement();
   unsubscribeRealtime();
   unsubscribeRealtime = subscribeToSettlements(() => {
     if (!currentRecord) {
+      if (document.querySelector(".action-panel")) return;
       void listSettlements().then((nextRecords) => {
         records = nextRecords;
-        renderList();
+        renderLanding();
       });
     }
   });

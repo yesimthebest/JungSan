@@ -1,9 +1,4 @@
-import {
-  createClient,
-  type RealtimeChannel,
-  type Session,
-  type SupabaseClient,
-} from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export type Participant = { id: string; name: string };
 export type Expense = {
@@ -30,14 +25,30 @@ export type SettlementRecord = {
   id: string;
   title: string;
   data: SettlementData;
-  owner_id: string;
-  share_token: string;
+  shareKey: string;
+  ownerKey?: string;
   created_at: string;
   updated_at: string;
 };
 
-const LOCAL_KEY = "zizon-settlements-v1";
-const LOCAL_USER_ID = "local-user";
+type StoredCredential = {
+  id: string;
+  shareKey: string;
+  ownerKey?: string;
+};
+
+type RpcRecord = {
+  id: string;
+  title: string;
+  data: SettlementData;
+  share_key: string;
+  owner_key?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+const CREDENTIALS_KEY = "zizon-settlement-keys-v2";
+const LOCAL_RECORDS_KEY = "zizon-settlements-local-v2";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
@@ -46,73 +57,93 @@ const supabase: SupabaseClient | null = isCloudEnabled
   ? createClient(supabaseUrl!, supabaseAnonKey!)
   : null;
 
-function loadLocal(): SettlementRecord[] {
+function normalizeKey(value: string) {
+  return value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+}
+
+export function formatShareKey(value: string) {
+  const normalized = normalizeKey(value);
+  return normalized.match(/.{1,4}/g)?.join("-") || normalized;
+}
+
+function getCredentials(): StoredCredential[] {
   try {
-    return JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]") as SettlementRecord[];
+    return JSON.parse(localStorage.getItem(CREDENTIALS_KEY) || "[]") as StoredCredential[];
   } catch {
     return [];
   }
 }
 
-function saveLocal(records: SettlementRecord[]) {
-  localStorage.setItem(LOCAL_KEY, JSON.stringify(records));
+function saveCredential(credential: StoredCredential) {
+  const rest = getCredentials().filter((item) => item.id !== credential.id);
+  localStorage.setItem(CREDENTIALS_KEY, JSON.stringify([credential, ...rest]));
 }
 
-export async function getSession(): Promise<Session | null> {
-  if (!supabase) return null;
-  const { data } = await supabase.auth.getSession();
-  return data.session;
+function removeCredential(id: string) {
+  localStorage.setItem(
+    CREDENTIALS_KEY,
+    JSON.stringify(getCredentials().filter((item) => item.id !== id)),
+  );
 }
 
-export function onAuthChange(callback: (session: Session | null) => void) {
-  if (!supabase) return () => undefined;
-  const { data } = supabase.auth.onAuthStateChange((_event, session) => callback(session));
-  return () => data.subscription.unsubscribe();
+function getLocalRecords(): SettlementRecord[] {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_RECORDS_KEY) || "[]") as SettlementRecord[];
+  } catch {
+    return [];
+  }
 }
 
-export async function sendMagicLink(email: string) {
-  if (!supabase) return;
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: window.location.origin + window.location.search },
-  });
-  if (error) throw error;
+function saveLocalRecords(records: SettlementRecord[]) {
+  localStorage.setItem(LOCAL_RECORDS_KEY, JSON.stringify(records));
 }
 
-export async function signOut() {
-  if (!supabase) return;
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
+function makeLocalShareKey() {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
 }
 
-export async function joinSettlement(token: string): Promise<string> {
-  if (!supabase) return "";
-  const { data, error } = await supabase.rpc("join_settlement", { invitation_token: token });
-  if (error) throw error;
-  return data as string;
+function fromRpc(record: RpcRecord, ownerKey?: string): SettlementRecord {
+  return {
+    id: record.id,
+    title: record.title,
+    data: record.data,
+    shareKey: record.share_key,
+    ownerKey,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+  };
 }
 
 export async function listSettlements(): Promise<SettlementRecord[]> {
   if (!supabase) {
-    return loadLocal().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    return getLocalRecords().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  const { data, error } = await supabase
-    .from("settlements")
-    .select("*")
-    .order("updated_at", { ascending: false });
-  if (error) throw error;
-  return data as SettlementRecord[];
+
+  const results = await Promise.all(
+    getCredentials().map(async (credential) => {
+      const { data, error } = await supabase.rpc("get_settlement", {
+        target_id: credential.id,
+        access_key: credential.ownerKey || credential.shareKey,
+      });
+      if (error || !data) return null;
+      return fromRpc(data as RpcRecord, credential.ownerKey);
+    }),
+  );
+  return results
+    .filter((record): record is SettlementRecord => Boolean(record))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 }
 
 export async function getSettlement(id: string): Promise<SettlementRecord | null> {
-  if (!supabase) return loadLocal().find((record) => record.id === id) || null;
-  const { data, error } = await supabase
-    .from("settlements")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  if (!supabase) return getLocalRecords().find((record) => record.id === id) || null;
+  const credential = getCredentials().find((item) => item.id === id);
+  if (!credential) return null;
+  const { data, error } = await supabase.rpc("get_settlement", {
+    target_id: id,
+    access_key: credential.ownerKey || credential.shareKey,
+  });
   if (error) throw error;
-  return data as SettlementRecord | null;
+  return data ? fromRpc(data as RpcRecord, credential.ownerKey) : null;
 }
 
 export async function createSettlement(data: SettlementData): Promise<SettlementRecord> {
@@ -122,57 +153,84 @@ export async function createSettlement(data: SettlementData): Promise<Settlement
       id: crypto.randomUUID(),
       title: data.title,
       data,
-      owner_id: LOCAL_USER_ID,
-      share_token: crypto.randomUUID(),
+      shareKey: makeLocalShareKey(),
+      ownerKey: crypto.randomUUID(),
       created_at: now,
       updated_at: now,
     };
-    saveLocal([record, ...loadLocal()]);
+    saveLocalRecords([record, ...getLocalRecords()]);
     return record;
   }
-  const { data: record, error } = await supabase
-    .from("settlements")
-    .insert({ title: data.title, data })
-    .select()
-    .single();
+
+  const { data: result, error } = await supabase.rpc("create_settlement", {
+    settlement_title: data.title,
+    settlement_data: data,
+  });
   if (error) throw error;
-  return record as SettlementRecord;
+  const rpcRecord = result as RpcRecord;
+  const record = fromRpc(rpcRecord, rpcRecord.owner_key);
+  saveCredential({ id: record.id, shareKey: record.shareKey, ownerKey: record.ownerKey });
+  return record;
 }
 
-export async function updateSettlement(id: string, data: SettlementData): Promise<void> {
+export async function joinSettlement(shareKey: string): Promise<SettlementRecord> {
+  const normalized = normalizeKey(shareKey);
+  if (!normalized) throw new Error("참여 키를 입력해 주세요.");
+
   if (!supabase) {
-    saveLocal(
-      loadLocal().map((record) =>
-        record.id === id
-          ? { ...record, title: data.title, data, updated_at: new Date().toISOString() }
-          : record,
+    const record = getLocalRecords().find((item) => normalizeKey(item.shareKey) === normalized);
+    if (!record) throw new Error("일치하는 정산을 찾을 수 없습니다.");
+    return { ...record, ownerKey: undefined };
+  }
+
+  const { data, error } = await supabase.rpc("join_settlement", {
+    participation_key: normalized,
+  });
+  if (error) throw error;
+  if (!data) throw new Error("일치하는 정산을 찾을 수 없습니다.");
+  const record = fromRpc(data as RpcRecord);
+  saveCredential({ id: record.id, shareKey: record.shareKey });
+  return record;
+}
+
+export async function updateSettlement(
+  record: SettlementRecord,
+  data: SettlementData,
+): Promise<void> {
+  if (!supabase) {
+    saveLocalRecords(
+      getLocalRecords().map((item) =>
+        item.id === record.id
+          ? { ...item, title: data.title, data, updated_at: new Date().toISOString() }
+          : item,
       ),
     );
     return;
   }
-  const { error } = await supabase
-    .from("settlements")
-    .update({ title: data.title, data })
-    .eq("id", id);
+  const { error } = await supabase.rpc("update_settlement", {
+    target_id: record.id,
+    access_key: record.ownerKey || record.shareKey,
+    settlement_title: data.title,
+    settlement_data: data,
+  });
   if (error) throw error;
 }
 
-export async function deleteSettlement(id: string): Promise<void> {
+export async function deleteSettlement(record: SettlementRecord): Promise<void> {
+  if (!record.ownerKey) throw new Error("정산을 만든 기기에서만 삭제할 수 있습니다.");
   if (!supabase) {
-    saveLocal(loadLocal().filter((record) => record.id !== id));
+    saveLocalRecords(getLocalRecords().filter((item) => item.id !== record.id));
     return;
   }
-  const { error } = await supabase.from("settlements").delete().eq("id", id);
+  const { error } = await supabase.rpc("delete_settlement", {
+    target_id: record.id,
+    deletion_key: record.ownerKey,
+  });
   if (error) throw error;
+  removeCredential(record.id);
 }
 
 export function subscribeToSettlements(onChange: () => void): () => void {
-  if (!supabase) return () => undefined;
-  const channel: RealtimeChannel = supabase
-    .channel("settlements-changes")
-    .on("postgres_changes", { event: "*", schema: "public", table: "settlements" }, onChange)
-    .subscribe();
-  return () => {
-    void supabase.removeChannel(channel);
-  };
+  const timer = window.setInterval(onChange, 5000);
+  return () => window.clearInterval(timer);
 }
