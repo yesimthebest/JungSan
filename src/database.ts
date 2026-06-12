@@ -62,13 +62,22 @@ function normalizeKey(value: string) {
 }
 
 export function formatShareKey(value: string) {
-  const normalized = normalizeKey(value);
-  return normalized.match(/.{1,4}/g)?.join("-") || normalized;
+  return normalizeKey(value).slice(0, 4);
 }
 
 function getCredentials(): StoredCredential[] {
   try {
-    return JSON.parse(localStorage.getItem(CREDENTIALS_KEY) || "[]") as StoredCredential[];
+    const saved = JSON.parse(
+      localStorage.getItem(CREDENTIALS_KEY) || "[]",
+    ) as StoredCredential[];
+    const migrated = saved.map((item) => ({
+      ...item,
+      shareKey: normalizeKey(item.shareKey).slice(0, 4),
+    }));
+    if (JSON.stringify(saved) !== JSON.stringify(migrated)) {
+      localStorage.setItem(CREDENTIALS_KEY, JSON.stringify(migrated));
+    }
+    return migrated;
   } catch {
     return [];
   }
@@ -88,7 +97,22 @@ function removeCredential(id: string) {
 
 function getLocalRecords(): SettlementRecord[] {
   try {
-    return JSON.parse(localStorage.getItem(LOCAL_RECORDS_KEY) || "[]") as SettlementRecord[];
+    const saved = JSON.parse(
+      localStorage.getItem(LOCAL_RECORDS_KEY) || "[]",
+    ) as SettlementRecord[];
+    const used = new Set<string>();
+    let changed = false;
+    const migrated = saved.map((record) => {
+      let key = normalizeKey(record.shareKey).slice(0, 4);
+      if (key.length !== 4 || used.has(key)) {
+        key = makeLocalShareKey(used);
+      }
+      used.add(key);
+      if (record.shareKey !== key) changed = true;
+      return { ...record, shareKey: key };
+    });
+    if (changed) saveLocalRecords(migrated);
+    return migrated;
   } catch {
     return [];
   }
@@ -98,8 +122,14 @@ function saveLocalRecords(records: SettlementRecord[]) {
   localStorage.setItem(LOCAL_RECORDS_KEY, JSON.stringify(records));
 }
 
-function makeLocalShareKey() {
-  return crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
+function makeLocalShareKey(used = new Set<string>()) {
+  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let key = "";
+  do {
+    const bytes = crypto.getRandomValues(new Uint8Array(4));
+    key = Array.from(bytes, (byte) => characters[byte % characters.length]).join("");
+  } while (used.has(key));
+  return key;
 }
 
 function fromRpc(record: RpcRecord, ownerKey?: string): SettlementRecord {
@@ -126,7 +156,9 @@ export async function listSettlements(): Promise<SettlementRecord[]> {
         access_key: credential.ownerKey || credential.shareKey,
       });
       if (error || !data) return null;
-      return fromRpc(data as RpcRecord, credential.ownerKey);
+      const record = fromRpc(data as RpcRecord, credential.ownerKey);
+      saveCredential({ id: record.id, shareKey: record.shareKey, ownerKey: credential.ownerKey });
+      return record;
     }),
   );
   return results
@@ -149,16 +181,17 @@ export async function getSettlement(id: string): Promise<SettlementRecord | null
 export async function createSettlement(data: SettlementData): Promise<SettlementRecord> {
   const now = new Date().toISOString();
   if (!supabase) {
+    const existingRecords = getLocalRecords();
     const record: SettlementRecord = {
       id: crypto.randomUUID(),
       title: data.title,
       data,
-      shareKey: makeLocalShareKey(),
+      shareKey: makeLocalShareKey(new Set(existingRecords.map((item) => item.shareKey))),
       ownerKey: crypto.randomUUID(),
       created_at: now,
       updated_at: now,
     };
-    saveLocalRecords([record, ...getLocalRecords()]);
+    saveLocalRecords([record, ...existingRecords]);
     return record;
   }
 

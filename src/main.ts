@@ -498,7 +498,7 @@ function renderLanding(mode: "home" | "create" | "join" = "home", errorMessage =
               <form id="join-form">
                 <label class="field">
                   <span>참여 키</span>
-                  <input id="participation-key" class="key-input" type="text" maxlength="14" autocomplete="off" placeholder="AB12-CD34-EF56" required autofocus />
+                  <input id="participation-key" class="key-input" type="text" maxlength="4" autocomplete="off" placeholder="A1B2" required autofocus />
                 </label>
                 <button class="primary-button" type="submit">정산 참여하기</button>
               </form>
